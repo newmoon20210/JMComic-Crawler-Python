@@ -1,0 +1,160 @@
+import os
+import tempfile
+import img2pdf
+from pathlib import Path
+from PIL import Image
+
+# ========== 配置区（可根据需要修改） ==========
+SOURCE_DIR = r"E:\韩漫\美丽新世界 _ すばらしき新世界(フルカラー)"  # 存放图片的子文件夹根目录
+OUTPUT_DIR = r"E:\韩漫\美丽新世界 _ すばらしき新世界(フルカラー)\pdf"  # PDF输出目录
+SUPPORTED_FORMATS = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif")  # 支持的图片格式
+OVERWRITE_EXISTING = False  # 是否覆盖已存在的PDF文件（False=跳过，True=覆盖）
+TARGET_WIDTH = 720  # 统一的图片宽度（像素），可根据需要调整
+
+
+# =============================================
+
+def resize_image(image_path, target_width, output_path):
+    """
+    调整图片尺寸：统一宽度，高度按比例自适应
+    :param image_path: 原始图片路径
+    :param target_width: 目标宽度（像素）
+    :param output_path: 调整后图片的保存路径
+    """
+    try:
+        with Image.open(image_path) as img:
+            # 转换为RGB模式（处理透明通道）
+            if img.mode in ('RGBA', 'P', 'LA'):
+                img = img.convert('RGB')
+
+            # 计算等比例高度
+            width, height = img.size
+            ratio = target_width / width
+            target_height = int(height * ratio)
+
+            # 调整尺寸（使用高质量插值算法）
+            resized_img = img.resize((target_width, target_height), Image.Resampling.LANCZOS)
+
+            # 保存调整后的图片
+            resized_img.save(output_path, quality=95, optimize=True)
+        return True
+    except Exception as e:
+        print(f"⚠️  调整图片尺寸失败 {image_path}：{e}")
+        return False
+
+
+def get_sorted_unique_images(folder_path):
+    """获取文件夹中所有唯一的图片，按文件名排序"""
+    image_paths = []
+    processed_files = set()  # 用于记录已处理的文件（去重）
+
+    for file in os.listdir(folder_path):
+        # 跳过隐藏文件和系统文件
+        if file.startswith('.') or file.startswith('~$'):
+            continue
+
+        # 统一转为小写，避免大小写重复匹配
+        file_lower = file.lower()
+        file_path = os.path.join(folder_path, file)
+
+        # 只处理文件，且是支持的图片格式
+        if os.path.isfile(file_path) and file_lower.endswith(SUPPORTED_FORMATS):
+            # 使用小写文件名作为去重标识
+            unique_key = os.path.join(folder_path, file_lower)
+            if unique_key not in processed_files:
+                processed_files.add(unique_key)
+                image_paths.append(file_path)
+
+    # 按文件名自然排序（保证漫画顺序正确）
+    image_paths.sort(key=lambda x: os.path.basename(x))
+    return image_paths
+
+
+def merge_images_to_pdf():
+    """核心函数：统一图片宽度并合并为PDF"""
+    # 确保输出目录存在
+    Path(OUTPUT_DIR).mkdir(exist_ok=True)
+
+    # 获取所有子文件夹
+    subfolders = [f for f in Path(SOURCE_DIR).iterdir() if f.is_dir()]
+    if not subfolders:
+        print(f"⚠️  未找到子文件夹：{SOURCE_DIR}")
+        return
+
+    print(f"🔍 共找到 {len(subfolders)} 个子文件夹，开始处理...")
+    print(f"📏 图片将统一调整为宽度：{TARGET_WIDTH} 像素\n")
+
+    success_count = 0
+    fail_count = 0
+
+    for folder in subfolders:
+        folder_name = folder.name
+        pdf_path = os.path.join(OUTPUT_DIR, f"{folder_name}.pdf")
+
+        # 跳过已存在的文件（如果不覆盖）
+        if os.path.exists(pdf_path) and not OVERWRITE_EXISTING:
+            print(f"⏩ 跳过已存在的文件：{pdf_path}")
+            continue
+
+        # 获取去重后的图片列表
+        original_image_paths = get_sorted_unique_images(folder)
+        if not original_image_paths:
+            print(f"❌ {folder_name}：未找到支持的图片文件\n")
+            fail_count += 1
+            continue
+
+        print(f"📋 {folder_name}：找到 {len(original_image_paths)} 张唯一图片")
+
+        # 创建临时目录存放调整后的图片
+        with tempfile.TemporaryDirectory() as temp_dir:
+            resized_image_paths = []
+
+            # 调整所有图片的尺寸
+            for idx, img_path in enumerate(original_image_paths):
+                # 生成临时文件路径
+                temp_img_name = f"resized_{idx}{Path(img_path).suffix}"
+                temp_img_path = os.path.join(temp_dir, temp_img_name)
+
+                # 调整图片尺寸并保存到临时目录
+                if resize_image(img_path, TARGET_WIDTH, temp_img_path):
+                    resized_image_paths.append(temp_img_path)
+
+            # 检查调整后的图片数量
+            if len(resized_image_paths) == 0:
+                print(f"❌ {folder_name}：所有图片尺寸调整失败\n")
+                fail_count += 1
+                continue
+
+            # 合并调整后的图片为PDF
+            try:
+                with open(pdf_path, "wb") as f:
+                    # 按调整后的图片尺寸生成PDF
+                    f.write(img2pdf.convert(resized_image_paths))
+
+                print(f"✅ 成功生成：{pdf_path}（共{len(resized_image_paths)}张图片）\n")
+                success_count += 1
+
+            except Exception as e:
+                print(f"❌ {folder_name}：生成PDF失败 - {str(e)}\n")
+                fail_count += 1
+                # 清理生成失败的空文件
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+
+    # 输出汇总信息
+    print(f"\n📊 处理完成！")
+    print(f"   成功：{success_count} | 失败：{fail_count} | 总计：{len(subfolders)}")
+
+
+if __name__ == "__main__":
+    # 检查依赖
+    try:
+        import img2pdf
+        from PIL import Image
+    except ImportError:
+        print("❌ 缺少必要库，请先执行安装命令：")
+        print("   pip install img2pdf pillow")
+    else:
+        # 启动合并流程
+        merge_images_to_pdf()
+        input("\n处理结束，按回车键退出...")  # 防止命令行窗口一闪而过
